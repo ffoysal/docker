@@ -26,8 +26,7 @@ set -o pipefail
 export DOCKER_PKG='github.com/docker/docker'
 export SCRIPTDIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 export MAKEDIR="$SCRIPTDIR/make"
-
-: ${TEST_REPEAT:=0}
+export PKG_CONFIG=${PKG_CONFIG:-pkg-config}
 
 # We're a nice, sexy, little shell script, and people might try to run us;
 # but really, they shouldn't. We want to be in a container!
@@ -74,7 +73,6 @@ DEFAULT_BUNDLES=(
 	test-integration-cli
 	test-docker-py
 
-	cover
 	cross
 	tgz
 )
@@ -93,7 +91,7 @@ if command -v git &> /dev/null && [ -d .git ] && git rev-parse &> /dev/null; the
 		git status --porcelain --untracked-files=no
 		echo "#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
 	fi
-	! BUILDTIME=$(date --rfc-3339 ns | sed -e 's/ /T/') &> /dev/null
+	! BUILDTIME=$(date --rfc-3339 ns 2> /dev/null | sed -e 's/ /T/') &> /dev/null
 	if [ -z $BUILDTIME ]; then
 		# If using bash 3.1 which doesn't support --rfc-3389, eg Windows CI
 		BUILDTIME=$(date -u)
@@ -113,6 +111,13 @@ if [ "$AUTO_GOPATH" ]; then
 	mkdir -p .gopath/src/"$(dirname "${DOCKER_PKG}")"
 	ln -sf ../../../.. .gopath/src/"${DOCKER_PKG}"
 	export GOPATH="${PWD}/.gopath:${PWD}/vendor"
+
+	if [ "$(go env GOOS)" = 'solaris' ]; then
+		# sys/unix is installed outside the standard library on solaris
+		# TODO need to allow for version change, need to get version from go
+		export GO_VERSION=${GO_VERSION:-"1.7.1"}
+		export GOPATH="${GOPATH}:/usr/lib/gocode/${GO_VERSION}"
+	fi
 fi
 
 if [ ! "$GOPATH" ]; then
@@ -128,9 +133,9 @@ if [ "$DOCKER_EXPERIMENTAL" ]; then
 fi
 
 DOCKER_BUILDTAGS+=" daemon"
-if pkg-config 'libsystemd >= 209' 2> /dev/null ; then
+if ${PKG_CONFIG} 'libsystemd >= 209' 2> /dev/null ; then
 	DOCKER_BUILDTAGS+=" journald"
-elif pkg-config 'libsystemd-journal' 2> /dev/null ; then
+elif ${PKG_CONFIG} 'libsystemd-journal' 2> /dev/null ; then
 	DOCKER_BUILDTAGS+=" journald journald_compat"
 fi
 
@@ -216,65 +221,6 @@ if \
 	HAVE_GO_TEST_COVER=1
 fi
 
-# If $TESTFLAGS is set in the environment, it is passed as extra arguments to 'go test'.
-# You can use this to select certain tests to run, eg.
-#
-#     TESTFLAGS='-test.run ^TestBuild$' ./hack/make.sh test-unit
-#
-# For integration-cli test, we use [gocheck](https://labix.org/gocheck), if you want
-# to run certain tests on your local host, you should run with command:
-#
-#     TESTFLAGS='-check.f DockerSuite.TestBuild*' ./hack/make.sh binary test-integration-cli
-#
-go_test_dir() {
-	dir=$1
-	coverpkg=$2
-	testcover=()
-	testcoverprofile=()
-	testbinary="$DEST/test.main"
-	if [ "$HAVE_GO_TEST_COVER" ]; then
-		# if our current go install has -cover, we want to use it :)
-		mkdir -p "$DEST/coverprofiles"
-		coverprofile="docker${dir#.}"
-		coverprofile="$ABS_DEST/coverprofiles/${coverprofile//\//-}"
-		testcover=( -test.cover )
-		testcoverprofile=( -test.coverprofile "$coverprofile" $coverpkg )
-	fi
-	(
-		echo '+ go test' $TESTFLAGS "${DOCKER_PKG}${dir#.}"
-		cd "$dir"
-		export DEST="$ABS_DEST" # we're in a subshell, so this is safe -- our integration-cli tests need DEST, and "cd" screws it up
-		go test -c -o "$testbinary" ${testcover[@]} -ldflags "$LDFLAGS" "${BUILDFLAGS[@]}"
-		i=0
-		while ((++i)); do
-			test_env "$testbinary" ${testcoverprofile[@]} $TESTFLAGS
-			if [ $i -gt "$TEST_REPEAT" ]; then
-				break
-			fi
-			echo "Repeating test ($i)"
-		done
-	)
-}
-test_env() {
-	# use "env -i" to tightly control the environment variables that bleed into the tests
-	env -i \
-		DEST="$DEST" \
-		DOCKER_TLS_VERIFY="$DOCKER_TEST_TLS_VERIFY" \
-		DOCKER_CERT_PATH="$DOCKER_TEST_CERT_PATH" \
-		DOCKER_ENGINE_GOARCH="$DOCKER_ENGINE_GOARCH" \
-		DOCKER_GRAPHDRIVER="$DOCKER_GRAPHDRIVER" \
-		DOCKER_USERLANDPROXY="$DOCKER_USERLANDPROXY" \
-		DOCKER_HOST="$DOCKER_HOST" \
-		DOCKER_REMAP_ROOT="$DOCKER_REMAP_ROOT" \
-		DOCKER_REMOTE_DAEMON="$DOCKER_REMOTE_DAEMON" \
-		GOPATH="$GOPATH" \
-		GOTRACEBACK=all \
-		HOME="$ABS_DEST/fake-HOME" \
-		PATH="$PATH" \
-		TEMP="$TEMP" \
-		"$@"
-}
-
 # a helper to provide ".exe" when it's appropriate
 binary_extension() {
 	if [ "$(go env GOOS)" = 'windows' ]; then
@@ -309,7 +255,7 @@ bundle() {
 	source "$SCRIPTDIR/make/$bundle" "$@"
 }
 
-copy_containerd() {
+copy_binaries() {
 	dir="$1"
 	# Add nested executables to bundle dir so we have complete set of
 	# them available, but only if the native OS/ARCH is the same as the
@@ -317,13 +263,25 @@ copy_containerd() {
 	if [ "$(go env GOOS)/$(go env GOARCH)" == "$(go env GOHOSTOS)/$(go env GOHOSTARCH)" ]; then
 		if [ -x /usr/local/bin/docker-runc ]; then
 			echo "Copying nested executables into $dir"
-			for file in containerd containerd-shim containerd-ctr runc; do
+			for file in containerd containerd-shim containerd-ctr runc init; do
 				cp `which "docker-$file"` "$dir/"
 				if [ "$2" == "hash" ]; then
 					hash_files "$dir/docker-$file"
 				fi
 			done
 		fi
+	fi
+}
+
+install_binary() {
+	file="$1"
+	target="${DOCKER_MAKE_INSTALL_PREFIX:=/usr/local}/bin/"
+	if [ "$(go env GOOS)" == "linux" ]; then
+		echo "Installing $(basename $file) to ${target}"
+		cp -L "$file" "$target"
+	else
+		echo "Install is only supported on linux"
+		return 1
 	fi
 }
 

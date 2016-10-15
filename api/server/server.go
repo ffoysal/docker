@@ -2,11 +2,13 @@ package server
 
 import (
 	"crypto/tls"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/docker/docker/api/errors"
 	"github.com/docker/docker/api/server/httputils"
 	"github.com/docker/docker/api/server/middleware"
 	"github.com/docker/docker/api/server/router"
@@ -74,7 +76,7 @@ func (s *Server) Close() {
 }
 
 // serveAPI loops through all initialized servers and spawns goroutine
-// with Server method for each. It sets createMux() as Handler also.
+// with Serve method for each. It sets createMux() as Handler also.
 func (s *Server) serveAPI() error {
 	var chErrors = make(chan error, len(s.servers))
 	for _, srv := range s.servers {
@@ -127,7 +129,7 @@ func (s *Server) makeHTTPHandler(handler httputils.APIFunc) http.HandlerFunc {
 		// immediate function being called should still be passed
 		// as 'args' on the function call.
 		ctx := context.Background()
-		handlerFunc := s.handleWithGlobalMiddlewares(handler)
+		handlerFunc := s.handlerWithGlobalMiddlewares(handler)
 
 		vars := mux.Vars(r)
 		if vars == nil {
@@ -136,7 +138,7 @@ func (s *Server) makeHTTPHandler(handler httputils.APIFunc) http.HandlerFunc {
 
 		if err := handlerFunc(ctx, w, r, vars); err != nil {
 			logrus.Errorf("Handler for %s %s returned error: %v", r.Method, r.URL.Path, err)
-			httputils.WriteError(w, err)
+			httputils.MakeErrorHandler(err)(w, r)
 		}
 	}
 }
@@ -144,9 +146,7 @@ func (s *Server) makeHTTPHandler(handler httputils.APIFunc) http.HandlerFunc {
 // InitRouter initializes the list of routers for the server.
 // This method also enables the Go profiler if enableProfiler is true.
 func (s *Server) InitRouter(enableProfiler bool, routers ...router.Router) {
-	for _, r := range routers {
-		s.routers = append(s.routers, r)
-	}
+	s.routers = append(s.routers, routers...)
 
 	m := s.createMux()
 	if enableProfiler {
@@ -161,7 +161,7 @@ func (s *Server) InitRouter(enableProfiler bool, routers ...router.Router) {
 func (s *Server) createMux() *mux.Router {
 	m := mux.NewRouter()
 
-	logrus.Debugf("Registering routers")
+	logrus.Debug("Registering routers")
 	for _, apiRouter := range s.routers {
 		for _, r := range apiRouter.Routes() {
 			f := s.makeHTTPHandler(r.Handler())
@@ -171,6 +171,11 @@ func (s *Server) createMux() *mux.Router {
 			m.Path(r.Path()).Methods(r.Method()).Handler(f)
 		}
 	}
+
+	err := errors.NewRequestNotFoundError(fmt.Errorf("page not found"))
+	notFoundHandler := httputils.MakeErrorHandler(err)
+	m.HandleFunc(versionMatcher+"/{path:.*}", notFoundHandler)
+	m.NotFoundHandler = notFoundHandler
 
 	return m
 }

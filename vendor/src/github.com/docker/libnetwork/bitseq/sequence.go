@@ -197,7 +197,7 @@ func (h *Handle) getCopy() *Handle {
 
 // SetAnyInRange atomically sets the first unset bit in the specified range in the sequence and returns the corresponding ordinal
 func (h *Handle) SetAnyInRange(start, end uint64) (uint64, error) {
-	if end-start <= 0 || end >= h.bits {
+	if end < start || end >= h.bits {
 		return invalidPos, fmt.Errorf("invalid bit range [%d, %d]", start, end)
 	}
 	if h.Unselected() == 0 {
@@ -370,6 +370,8 @@ func (h *Handle) set(ordinal, start, end uint64, any bool, release bool) (uint64
 
 // checks is needed because to cover the case where the number of bits is not a multiple of blockLen
 func (h *Handle) validateOrdinal(ordinal uint64) error {
+	h.Lock()
+	defer h.Unlock()
 	if ordinal >= h.bits {
 		return fmt.Errorf("bit does not belong to the sequence")
 	}

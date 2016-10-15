@@ -1,23 +1,22 @@
-<!--[metadata]>
-+++
-title = "history"
-description = "The history command description and usage"
-keywords = ["docker, image, history"]
-[menu.main]
-parent = "smn_cli"
-+++
-<![end-metadata]-->
+---
+title: "history"
+description: "The history command description and usage"
+keywords: ["docker, image, history"]
+---
 
 # history
 
-    Usage: docker history [OPTIONS] IMAGE
+```markdown
+Usage:  docker history [OPTIONS] IMAGE
 
-    Show the history of an image
+Show the history of an image
 
-      -H, --human=true     Print sizes and dates in human readable format
-      --help               Print usage
-      --no-trunc           Don't truncate output
-      -q, --quiet          Only show numeric IDs
+Options:
+      --help       Print usage
+  -H, --human      Print sizes and dates in human readable format (default true)
+      --no-trunc   Don't truncate output
+  -q, --quiet      Only show numeric IDs
+```
 
 To see how the `docker:latest` image was built:
 

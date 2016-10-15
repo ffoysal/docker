@@ -13,7 +13,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -135,6 +134,11 @@ func (s *DockerSuite) TestRunAttachDetach(c *check.C) {
 
 	running := inspectField(c, name, "State.Running")
 	c.Assert(running, checker.Equals, "true", check.Commentf("expected container to still be running"))
+
+	out, _ = dockerCmd(c, "events", "--since=0", "--until", daemonUnixTime(c), "-f", "container="+name)
+	// attach and detach event should be monitored
+	c.Assert(out, checker.Contains, "attach")
+	c.Assert(out, checker.Contains, "detach")
 }
 
 // TestRunDetach checks attaching and detaching with the escape sequence specified via flags.
@@ -145,7 +149,7 @@ func (s *DockerSuite) TestRunAttachDetachFromFlag(c *check.C) {
 
 	dockerCmd(c, "run", "--name", name, "-itd", "busybox", "cat")
 
-	cmd := exec.Command(dockerBinary, "attach", "--detach-keys='ctrl-a,a'", name)
+	cmd := exec.Command(dockerBinary, "attach", "--detach-keys=ctrl-a,a", name)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		c.Fatal(err)
@@ -205,7 +209,7 @@ func (s *DockerSuite) TestRunAttachDetachFromInvalidFlag(c *check.C) {
 	c.Assert(waitRun(name), check.IsNil)
 
 	// specify an invalid detach key, container will ignore it and use default
-	cmd := exec.Command(dockerBinary, "attach", "--detach-keys='ctrl-A,a'", name)
+	cmd := exec.Command(dockerBinary, "attach", "--detach-keys=ctrl-A,a", name)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		c.Fatal(err)
@@ -343,7 +347,7 @@ func (s *DockerSuite) TestRunAttachDetachKeysOverrideConfig(c *check.C) {
 	name := "attach-detach"
 	dockerCmd(c, "run", "--name", name, "-itd", "busybox", "cat")
 
-	cmd := exec.Command(dockerBinary, "attach", "--detach-keys='ctrl-a,a'", name)
+	cmd := exec.Command(dockerBinary, "attach", "--detach-keys=ctrl-a,a", name)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		c.Fatal(err)
@@ -394,6 +398,55 @@ func (s *DockerSuite) TestRunAttachDetachKeysOverrideConfig(c *check.C) {
 
 	running := inspectField(c, name, "State.Running")
 	c.Assert(running, checker.Equals, "true", check.Commentf("expected container to still be running"))
+}
+
+func (s *DockerSuite) TestRunAttachInvalidDetachKeySequencePreserved(c *check.C) {
+	name := "attach-detach"
+	keyA := []byte{97}
+	keyB := []byte{98}
+
+	dockerCmd(c, "run", "--name", name, "-itd", "busybox", "cat")
+
+	cmd := exec.Command(dockerBinary, "attach", "--detach-keys=a,b,c", name)
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		c.Fatal(err)
+	}
+	cpty, tty, err := pty.Open()
+	if err != nil {
+		c.Fatal(err)
+	}
+	defer cpty.Close()
+	cmd.Stdin = tty
+	if err := cmd.Start(); err != nil {
+		c.Fatal(err)
+	}
+	c.Assert(waitRun(name), check.IsNil)
+
+	// Invalid escape sequence aba, should print aba in output
+	if _, err := cpty.Write(keyA); err != nil {
+		c.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := cpty.Write(keyB); err != nil {
+		c.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := cpty.Write(keyA); err != nil {
+		c.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if _, err := cpty.Write([]byte("\n")); err != nil {
+		c.Fatal(err)
+	}
+
+	out, err := bufio.NewReader(stdout).ReadString('\n')
+	if err != nil {
+		c.Fatal(err)
+	}
+	if strings.TrimSpace(out) != "aba" {
+		c.Fatalf("expected 'aba', got %q", out)
+	}
 }
 
 // "test" should be printed
@@ -558,8 +611,7 @@ func (s *DockerSuite) TestRunOOMExitCode(c *check.C) {
 	errChan := make(chan error)
 	go func() {
 		defer close(errChan)
-		//changing memory to 40MB from 4MB due to an issue with GCCGO that test fails to start the container.
-		out, exitCode, _ := dockerCmdWithError("run", "-m", "40MB", "busybox", "sh", "-c", "x=a; while true; do x=$x$x$x$x; done")
+		out, exitCode, _ := dockerCmdWithError("run", "-m", "4MB", "busybox", "sh", "-c", "x=a; while true; do x=$x$x$x$x; done")
 		if expected := 137; exitCode != expected {
 			errChan <- fmt.Errorf("wrong exit code for OOM container: expected %d, got %d (output: %q)", expected, exitCode, out)
 		}
@@ -633,7 +685,7 @@ func (s *DockerSuite) TestRunWithMemoryReservationInvalid(c *check.C) {
 	testRequires(c, memoryReservationSupport)
 	out, _, err := dockerCmdWithError("run", "-m", "500M", "--memory-reservation", "800M", "busybox", "true")
 	c.Assert(err, check.NotNil)
-	expected := "Minimum memory limit should be larger than memory reservation limit"
+	expected := "Minimum memory limit can not be less than memory reservation limit"
 	c.Assert(strings.TrimSpace(out), checker.Contains, expected, check.Commentf("run container should fail with invalid memory reservation"))
 
 	out, _, err = dockerCmdWithError("run", "--memory-reservation", "1k", "busybox", "true")
@@ -775,6 +827,64 @@ func (s *DockerSuite) TestRunTmpfsMounts(c *check.C) {
 	}
 }
 
+func (s *DockerSuite) TestRunTmpfsMountsOverrideImageVolumes(c *check.C) {
+	name := "img-with-volumes"
+	_, err := buildImage(
+		name,
+		`
+    FROM busybox
+    VOLUME /run
+    RUN touch /run/stuff
+    `,
+		true)
+	if err != nil {
+		c.Fatal(err)
+	}
+	out, _ := dockerCmd(c, "run", "--tmpfs", "/run", name, "ls", "/run")
+	c.Assert(out, checker.Not(checker.Contains), "stuff")
+}
+
+// Test case for #22420
+func (s *DockerSuite) TestRunTmpfsMountsWithOptions(c *check.C) {
+	testRequires(c, DaemonIsLinux)
+
+	expectedOptions := []string{"rw", "nosuid", "nodev", "noexec", "relatime"}
+	out, _ := dockerCmd(c, "run", "--tmpfs", "/tmp", "busybox", "sh", "-c", "mount | grep 'tmpfs on /tmp'")
+	for _, option := range expectedOptions {
+		c.Assert(out, checker.Contains, option)
+	}
+	c.Assert(out, checker.Not(checker.Contains), "size=")
+
+	expectedOptions = []string{"rw", "nosuid", "nodev", "noexec", "relatime"}
+	out, _ = dockerCmd(c, "run", "--tmpfs", "/tmp:rw", "busybox", "sh", "-c", "mount | grep 'tmpfs on /tmp'")
+	for _, option := range expectedOptions {
+		c.Assert(out, checker.Contains, option)
+	}
+	c.Assert(out, checker.Not(checker.Contains), "size=")
+
+	expectedOptions = []string{"rw", "nosuid", "nodev", "relatime", "size=8192k"}
+	out, _ = dockerCmd(c, "run", "--tmpfs", "/tmp:rw,exec,size=8192k", "busybox", "sh", "-c", "mount | grep 'tmpfs on /tmp'")
+	for _, option := range expectedOptions {
+		c.Assert(out, checker.Contains, option)
+	}
+
+	expectedOptions = []string{"rw", "nosuid", "nodev", "noexec", "relatime", "size=4096k"}
+	out, _ = dockerCmd(c, "run", "--tmpfs", "/tmp:rw,size=8192k,exec,size=4096k,noexec", "busybox", "sh", "-c", "mount | grep 'tmpfs on /tmp'")
+	for _, option := range expectedOptions {
+		c.Assert(out, checker.Contains, option)
+	}
+
+	// We use debian:jessie as there is no findmnt in busybox. Also the output will be in the format of
+	// TARGET PROPAGATION
+	// /tmp   shared
+	// so we only capture `shared` here.
+	expectedOptions = []string{"shared"}
+	out, _ = dockerCmd(c, "run", "--tmpfs", "/tmp:shared", "debian:jessie", "findmnt", "-o", "TARGET,PROPAGATION", "/tmp")
+	for _, option := range expectedOptions {
+		c.Assert(out, checker.Contains, option)
+	}
+}
+
 func (s *DockerSuite) TestRunSysctls(c *check.C) {
 
 	testRequires(c, DaemonIsLinux)
@@ -801,7 +911,7 @@ func (s *DockerSuite) TestRunSysctls(c *check.C) {
 
 	runCmd := exec.Command(dockerBinary, "run", "--sysctl", "kernel.foobar=1", "--name", "test2", "busybox", "cat", "/proc/sys/kernel/foobar")
 	out, _, _ = runCommandWithOutput(runCmd)
-	if !strings.Contains(out, "invalid value") {
+	if !strings.Contains(out, "invalid argument") {
 		c.Fatalf("expected --sysctl to fail, got %s", out)
 	}
 }
@@ -819,10 +929,10 @@ func (s *DockerSuite) TestRunSeccompProfileDenyUnshare(c *check.C) {
 	]
 }`
 	tmpFile, err := ioutil.TempFile("", "profile.json")
-	defer tmpFile.Close()
 	if err != nil {
 		c.Fatal(err)
 	}
+	defer tmpFile.Close()
 
 	if _, err := tmpFile.Write([]byte(jsonData)); err != nil {
 		c.Fatal(err)
@@ -843,6 +953,14 @@ func (s *DockerSuite) TestRunSeccompProfileDenyChmod(c *check.C) {
 		{
 			"name": "chmod",
 			"action": "SCMP_ACT_ERRNO"
+		},
+		{
+			"name":"fchmod",
+			"action": "SCMP_ACT_ERRNO"
+		},
+		{
+			"name": "fchmodat",
+			"action":"SCMP_ACT_ERRNO"
 		}
 	]
 }`
@@ -882,10 +1000,10 @@ func (s *DockerSuite) TestRunSeccompProfileDenyUnshareUserns(c *check.C) {
 	]
 }`, uint64(0x10000000))
 	tmpFile, err := ioutil.TempFile("", "profile.json")
-	defer tmpFile.Close()
 	if err != nil {
 		c.Fatal(err)
 	}
+	defer tmpFile.Close()
 
 	if _, err := tmpFile.Write([]byte(jsonData)); err != nil {
 		c.Fatal(err)
@@ -901,6 +1019,7 @@ func (s *DockerSuite) TestRunSeccompProfileDenyUnshareUserns(c *check.C) {
 // with a the default seccomp profile exits with operation not permitted.
 func (s *DockerSuite) TestRunSeccompProfileDenyCloneUserns(c *check.C) {
 	testRequires(c, SameHostDaemon, seccompEnabled)
+	ensureSyscallTest(c)
 
 	runCmd := exec.Command(dockerBinary, "run", "syscall-test", "userns-test", "id")
 	out, _, err := runCommandWithOutput(runCmd)
@@ -912,7 +1031,8 @@ func (s *DockerSuite) TestRunSeccompProfileDenyCloneUserns(c *check.C) {
 // TestRunSeccompUnconfinedCloneUserns checks that
 // 'docker run --security-opt seccomp=unconfined syscall-test' allows creating a userns.
 func (s *DockerSuite) TestRunSeccompUnconfinedCloneUserns(c *check.C) {
-	testRequires(c, SameHostDaemon, seccompEnabled, UserNamespaceInKernel, NotUserNamespace)
+	testRequires(c, SameHostDaemon, seccompEnabled, UserNamespaceInKernel, NotUserNamespace, unprivilegedUsernsClone)
+	ensureSyscallTest(c)
 
 	// make sure running w privileged is ok
 	runCmd := exec.Command(dockerBinary, "run", "--security-opt", "seccomp=unconfined", "syscall-test", "userns-test", "id")
@@ -925,11 +1045,24 @@ func (s *DockerSuite) TestRunSeccompUnconfinedCloneUserns(c *check.C) {
 // allows creating a userns.
 func (s *DockerSuite) TestRunSeccompAllowPrivCloneUserns(c *check.C) {
 	testRequires(c, SameHostDaemon, seccompEnabled, UserNamespaceInKernel, NotUserNamespace)
+	ensureSyscallTest(c)
 
 	// make sure running w privileged is ok
 	runCmd := exec.Command(dockerBinary, "run", "--privileged", "syscall-test", "userns-test", "id")
 	if out, _, err := runCommandWithOutput(runCmd); err != nil || !strings.Contains(out, "nobody") {
 		c.Fatalf("expected clone userns with --privileged to succeed, got %s: %v", out, err)
+	}
+}
+
+// TestRunSeccompProfileAllow32Bit checks that 32 bit code can run on x86_64
+// with the default seccomp profile.
+func (s *DockerSuite) TestRunSeccompProfileAllow32Bit(c *check.C) {
+	testRequires(c, SameHostDaemon, seccompEnabled, IsAmd64)
+	ensureSyscallTest(c)
+
+	runCmd := exec.Command(dockerBinary, "run", "syscall-test", "exit32-test", "id")
+	if out, _, err := runCommandWithOutput(runCmd); err != nil {
+		c.Fatalf("expected to be able to run 32 bit code, got %s: %v", out, err)
 	}
 }
 
@@ -944,49 +1077,68 @@ func (s *DockerSuite) TestRunSeccompAllowSetrlimit(c *check.C) {
 	}
 }
 
-func (s *DockerSuite) TestRunSeccompDefaultProfile(c *check.C) {
+func (s *DockerSuite) TestRunSeccompDefaultProfileAcct(c *check.C) {
 	testRequires(c, SameHostDaemon, seccompEnabled, NotUserNamespace)
+	ensureSyscallTest(c)
 
-	var group sync.WaitGroup
-	group.Add(4)
-	errChan := make(chan error, 4)
-	go func() {
-		out, _, err := dockerCmdWithError("run", "--cap-add", "ALL", "syscall-test", "acct-test")
-		if err == nil || !strings.Contains(out, "Operation not permitted") {
-			errChan <- fmt.Errorf("expected Operation not permitted, got: %s", out)
-		}
-		group.Done()
-	}()
+	out, _, err := dockerCmdWithError("run", "syscall-test", "acct-test")
+	if err == nil || !strings.Contains(out, "Operation not permitted") {
+		c.Fatalf("test 0: expected Operation not permitted, got: %s", out)
+	}
 
-	go func() {
-		out, _, err := dockerCmdWithError("run", "--cap-add", "ALL", "syscall-test", "ns-test", "echo", "hello")
-		if err == nil || !strings.Contains(out, "Operation not permitted") {
-			errChan <- fmt.Errorf("expected Operation not permitted, got: %s", out)
-		}
-		group.Done()
-	}()
+	out, _, err = dockerCmdWithError("run", "--cap-add", "sys_admin", "syscall-test", "acct-test")
+	if err == nil || !strings.Contains(out, "Operation not permitted") {
+		c.Fatalf("test 1: expected Operation not permitted, got: %s", out)
+	}
 
-	go func() {
-		out, _, err := dockerCmdWithError("run", "--cap-add", "ALL", "--security-opt", "seccomp=unconfined", "syscall-test", "acct-test")
-		if err == nil || !strings.Contains(out, "No such file or directory") {
-			errChan <- fmt.Errorf("expected No such file or directory, got: %s", out)
-		}
-		group.Done()
-	}()
+	out, _, err = dockerCmdWithError("run", "--cap-add", "sys_pacct", "syscall-test", "acct-test")
+	if err == nil || !strings.Contains(out, "No such file or directory") {
+		c.Fatalf("test 2: expected No such file or directory, got: %s", out)
+	}
 
-	go func() {
-		out, _, err := dockerCmdWithError("run", "--cap-add", "ALL", "--security-opt", "seccomp=unconfined", "syscall-test", "ns-test", "echo", "hello")
-		if err != nil || !strings.Contains(out, "hello") {
-			errChan <- fmt.Errorf("expected hello, got: %s, %v", out, err)
-		}
-		group.Done()
-	}()
+	out, _, err = dockerCmdWithError("run", "--cap-add", "ALL", "syscall-test", "acct-test")
+	if err == nil || !strings.Contains(out, "No such file or directory") {
+		c.Fatalf("test 3: expected No such file or directory, got: %s", out)
+	}
 
-	group.Wait()
-	close(errChan)
+	out, _, err = dockerCmdWithError("run", "--cap-drop", "ALL", "--cap-add", "sys_pacct", "syscall-test", "acct-test")
+	if err == nil || !strings.Contains(out, "No such file or directory") {
+		c.Fatalf("test 4: expected No such file or directory, got: %s", out)
+	}
+}
 
-	for err := range errChan {
-		c.Assert(err, checker.IsNil)
+func (s *DockerSuite) TestRunSeccompDefaultProfileNS(c *check.C) {
+	testRequires(c, SameHostDaemon, seccompEnabled, NotUserNamespace)
+	ensureSyscallTest(c)
+
+	out, _, err := dockerCmdWithError("run", "syscall-test", "ns-test", "echo", "hello0")
+	if err == nil || !strings.Contains(out, "Operation not permitted") {
+		c.Fatalf("test 0: expected Operation not permitted, got: %s", out)
+	}
+
+	out, _, err = dockerCmdWithError("run", "--cap-add", "sys_admin", "syscall-test", "ns-test", "echo", "hello1")
+	if err != nil || !strings.Contains(out, "hello1") {
+		c.Fatalf("test 1: expected hello1, got: %s, %v", out, err)
+	}
+
+	out, _, err = dockerCmdWithError("run", "--cap-drop", "all", "--cap-add", "sys_admin", "syscall-test", "ns-test", "echo", "hello2")
+	if err != nil || !strings.Contains(out, "hello2") {
+		c.Fatalf("test 2: expected hello2, got: %s, %v", out, err)
+	}
+
+	out, _, err = dockerCmdWithError("run", "--cap-add", "ALL", "syscall-test", "ns-test", "echo", "hello3")
+	if err != nil || !strings.Contains(out, "hello3") {
+		c.Fatalf("test 3: expected hello3, got: %s, %v", out, err)
+	}
+
+	out, _, err = dockerCmdWithError("run", "--cap-add", "ALL", "--security-opt", "seccomp=unconfined", "syscall-test", "acct-test")
+	if err == nil || !strings.Contains(out, "No such file or directory") {
+		c.Fatalf("test 4: expected No such file or directory, got: %s", out)
+	}
+
+	out, _, err = dockerCmdWithError("run", "--cap-add", "ALL", "--security-opt", "seccomp=unconfined", "syscall-test", "ns-test", "echo", "hello4")
+	if err != nil || !strings.Contains(out, "hello4") {
+		c.Fatalf("test 5: expected hello4, got: %s, %v", out, err)
 	}
 }
 
@@ -994,12 +1146,31 @@ func (s *DockerSuite) TestRunSeccompDefaultProfile(c *check.C) {
 // effective uid transtions on executing setuid binaries.
 func (s *DockerSuite) TestRunNoNewPrivSetuid(c *check.C) {
 	testRequires(c, DaemonIsLinux, NotUserNamespace, SameHostDaemon)
+	ensureNNPTest(c)
 
 	// test that running a setuid binary results in no effective uid transition
 	runCmd := exec.Command(dockerBinary, "run", "--security-opt", "no-new-privileges", "--user", "1000", "nnp-test", "/usr/bin/nnp-test")
 	if out, _, err := runCommandWithOutput(runCmd); err != nil || !strings.Contains(out, "EUID=1000") {
 		c.Fatalf("expected output to contain EUID=1000, got %s: %v", out, err)
 	}
+}
+
+func (s *DockerSuite) TestRunAmbientCapabilities(c *check.C) {
+	testRequires(c, DaemonIsLinux, ambientCapabilities)
+
+	// test that a non root user can gain capabilities
+	runCmd := exec.Command(dockerBinary, "run", "--user", "1000", "--cap-add", "chown", "busybox", "chown", "100", "/tmp")
+	_, _, err := runCommandWithOutput(runCmd)
+	c.Assert(err, check.IsNil)
+	// test that non root user has default capabilities
+	runCmd = exec.Command(dockerBinary, "run", "--user", "1000", "busybox", "chown", "100", "/tmp")
+	_, _, err = runCommandWithOutput(runCmd)
+	c.Assert(err, check.IsNil)
+	// test this fails without cap_chown
+	runCmd = exec.Command(dockerBinary, "run", "--user", "1000", "--cap-drop", "chown", "busybox", "chown", "100", "/tmp")
+	out, _, err := runCommandWithOutput(runCmd)
+	c.Assert(err, checker.NotNil, check.Commentf(out))
+	c.Assert(strings.TrimSpace(out), checker.Equals, "chown: /tmp: Operation not permitted")
 }
 
 func (s *DockerSuite) TestRunApparmorProcDirectory(c *check.C) {
@@ -1076,16 +1247,16 @@ func (s *DockerSuite) TestRunDeviceSymlink(c *check.C) {
 	c.Assert(strings.Trim(out, "\r\n"), checker.Contains, "bb7df04e1b0a2570657527a7e108ae23", check.Commentf("expected output bb7df04e1b0a2570657527a7e108ae23"))
 }
 
-// TestRunPidsLimit makes sure the pids cgroup is set with --pids-limit
-func (s *DockerSuite) TestRunPidsLimit(c *check.C) {
+// TestRunPIDsLimit makes sure the pids cgroup is set with --pids-limit
+func (s *DockerSuite) TestRunPIDsLimit(c *check.C) {
 	testRequires(c, pidsLimit)
 
 	file := "/sys/fs/cgroup/pids/pids.max"
-	out, _ := dockerCmd(c, "run", "--name", "skittles", "--pids-limit", "2", "busybox", "cat", file)
-	c.Assert(strings.TrimSpace(out), checker.Equals, "2")
+	out, _ := dockerCmd(c, "run", "--name", "skittles", "--pids-limit", "4", "busybox", "cat", file)
+	c.Assert(strings.TrimSpace(out), checker.Equals, "4")
 
 	out = inspectField(c, "skittles", "HostConfig.PidsLimit")
-	c.Assert(out, checker.Equals, "2", check.Commentf("setting the pids limit failed"))
+	c.Assert(out, checker.Equals, "4", check.Commentf("setting the pids limit failed"))
 }
 
 func (s *DockerSuite) TestRunPrivilegedAllowedDevices(c *check.C) {
@@ -1112,4 +1283,95 @@ func (s *DockerSuite) TestRunUserDeviceAllowed(c *check.C) {
 	file := "/sys/fs/cgroup/devices/devices.list"
 	out, _ := dockerCmd(c, "run", "--device", "/dev/snd/timer:w", "busybox", "cat", file)
 	c.Assert(out, checker.Contains, fmt.Sprintf("c %d:%d w", stat.Rdev/256, stat.Rdev%256))
+}
+
+func (s *DockerDaemonSuite) TestRunSeccompJSONNewFormat(c *check.C) {
+	testRequires(c, SameHostDaemon, seccompEnabled)
+
+	err := s.d.StartWithBusybox()
+	c.Assert(err, check.IsNil)
+
+	jsonData := `{
+	"defaultAction": "SCMP_ACT_ALLOW",
+	"syscalls": [
+		{
+			"names": ["chmod", "fchmod", "fchmodat"],
+			"action": "SCMP_ACT_ERRNO"
+		}
+	]
+}`
+	tmpFile, err := ioutil.TempFile("", "profile.json")
+	c.Assert(err, check.IsNil)
+	defer tmpFile.Close()
+	_, err = tmpFile.Write([]byte(jsonData))
+	c.Assert(err, check.IsNil)
+
+	out, err := s.d.Cmd("run", "--security-opt", "seccomp="+tmpFile.Name(), "busybox", "chmod", "777", ".")
+	c.Assert(err, check.NotNil)
+	c.Assert(out, checker.Contains, "Operation not permitted")
+}
+
+func (s *DockerDaemonSuite) TestRunSeccompJSONNoNameAndNames(c *check.C) {
+	testRequires(c, SameHostDaemon, seccompEnabled)
+
+	err := s.d.StartWithBusybox()
+	c.Assert(err, check.IsNil)
+
+	jsonData := `{
+	"defaultAction": "SCMP_ACT_ALLOW",
+	"syscalls": [
+		{
+			"name": "chmod",
+			"names": ["fchmod", "fchmodat"],
+			"action": "SCMP_ACT_ERRNO"
+		}
+	]
+}`
+	tmpFile, err := ioutil.TempFile("", "profile.json")
+	c.Assert(err, check.IsNil)
+	defer tmpFile.Close()
+	_, err = tmpFile.Write([]byte(jsonData))
+	c.Assert(err, check.IsNil)
+
+	out, err := s.d.Cmd("run", "--security-opt", "seccomp="+tmpFile.Name(), "busybox", "chmod", "777", ".")
+	c.Assert(err, check.NotNil)
+	c.Assert(out, checker.Contains, "'name' and 'names' were specified in the seccomp profile, use either 'name' or 'names'")
+}
+
+func (s *DockerDaemonSuite) TestRunSeccompJSONNoArchAndArchMap(c *check.C) {
+	testRequires(c, SameHostDaemon, seccompEnabled)
+
+	err := s.d.StartWithBusybox()
+	c.Assert(err, check.IsNil)
+
+	jsonData := `{
+	"archMap": [
+		{
+			"architecture": "SCMP_ARCH_X86_64",
+			"subArchitectures": [
+				"SCMP_ARCH_X86",
+				"SCMP_ARCH_X32"
+			]
+		}
+	],
+	"architectures": [
+		"SCMP_ARCH_X32"
+	],
+	"defaultAction": "SCMP_ACT_ALLOW",
+	"syscalls": [
+		{
+			"names": ["chmod", "fchmod", "fchmodat"],
+			"action": "SCMP_ACT_ERRNO"
+		}
+	]
+}`
+	tmpFile, err := ioutil.TempFile("", "profile.json")
+	c.Assert(err, check.IsNil)
+	defer tmpFile.Close()
+	_, err = tmpFile.Write([]byte(jsonData))
+	c.Assert(err, check.IsNil)
+
+	out, err := s.d.Cmd("run", "--security-opt", "seccomp="+tmpFile.Name(), "busybox", "chmod", "777", ".")
+	c.Assert(err, check.NotNil)
+	c.Assert(out, checker.Contains, "'architectures' and 'archMap' were specified in the seccomp profile, use either 'architectures' or 'archMap'")
 }

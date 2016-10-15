@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"syscall"
 
@@ -40,6 +41,9 @@ func notifySystem() {
 // notifyShutdown is called after the daemon shuts down but before the process exits.
 func notifyShutdown(err error) {
 	if service != nil {
+		if err != nil {
+			logrus.Fatal(err)
+		}
 		service.stopped(err)
 	}
 }
@@ -72,6 +76,16 @@ func (cli *DaemonCli) getLibcontainerdRoot() string {
 	return ""
 }
 
+// getSwarmRunRoot gets the root directory for swarm to store runtime state
+// For example, the control socket
+func (cli *DaemonCli) getSwarmRunRoot() string {
+	return ""
+}
+
 func allocateDaemonPort(addr string) error {
 	return nil
+}
+
+func wrapListeners(proto string, ls []net.Listener) []net.Listener {
+	return ls
 }

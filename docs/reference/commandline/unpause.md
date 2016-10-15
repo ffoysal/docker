@@ -1,24 +1,23 @@
-<!--[metadata]>
-+++
-title = "unpause"
-description = "The unpause command description and usage"
-keywords = ["cgroups, suspend, container"]
-[menu.main]
-parent = "smn_cli"
-+++
-<![end-metadata]-->
+---
+title: "unpause"
+description: "The unpause command description and usage"
+keywords: ["cgroups, suspend, container"]
+---
 
 # unpause
 
-    Usage: docker unpause [OPTIONS] CONTAINER [CONTAINER...]
+```markdown
+Usage:  docker unpause CONTAINER [CONTAINER...]
 
-    Unpause all processes within a container
+Unpause all processes within one or more containers
 
-      --help          Print usage
+Options:
+      --help   Print usage
+```
 
-The `docker unpause` command uses the cgroups freezer to un-suspend all
-processes in a container.
+The `docker unpause` command un-suspends all processes in a container.
+On Linux, it does this using the cgroups freezer.
 
 See the
-[cgroups freezer documentation](https://www.kernel.org/doc/Documentation/cgroups/freezer-subsystem.txt)
+[cgroups freezer documentation](https://www.kernel.org/doc/Documentation/cgroup-v1/freezer-subsystem.txt)
 for further details.

@@ -6,9 +6,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/cliconfig/configfile"
 	"github.com/docker/docker/pkg/homedir"
-	"github.com/docker/engine-api/types"
 )
 
 const (
@@ -16,11 +16,6 @@ const (
 	ConfigFileName = "config.json"
 	configFileDir  = ".docker"
 	oldConfigfile  = ".dockercfg"
-
-	// This constant is only used for really old config files when the
-	// URL wasn't saved as part of the config file and it was just
-	// assumed to be this value.
-	defaultIndexserver = "https://index.docker.io/v1/"
 )
 
 var (

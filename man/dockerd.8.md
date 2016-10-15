@@ -6,6 +6,7 @@ dockerd - Enable daemon mode
 
 # SYNOPSIS
 **dockerd**
+[**--add-runtime**[=*[]*]]
 [**--api-cors-header**=[=*API-CORS-HEADER*]]
 [**--authorization-plugin**[=*[]*]]
 [**-b**|**--bridge**[=*BRIDGE*]]
@@ -33,14 +34,18 @@ dockerd - Enable daemon mode
 [**-H**|**--host**[=*[]*]]
 [**--help**]
 [**--icc**[=*true*]]
+[**--init**[=*false*]]
+[**--init-path**[=*""*]]
 [**--insecure-registry**[=*[]*]]
 [**--ip**[=*0.0.0.0*]]
 [**--ip-forward**[=*true*]]
 [**--ip-masq**[=*true*]]
 [**--iptables**[=*true*]]
 [**--ipv6**]
+[**--isolation**[=*default*]]
 [**-l**|**--log-level**[=*info*]]
 [**--label**[=*[]*]]
+[**--live-restore**[=*false*]]
 [**--log-driver**[=*json-file*]]
 [**--log-opt**[=*map[]*]]
 [**--mtu**[=*0*]]
@@ -52,12 +57,14 @@ dockerd - Enable daemon mode
 [**-s**|**--storage-driver**[=*STORAGE-DRIVER*]]
 [**--selinux-enabled**]
 [**--storage-opt**[=*[]*]]
+[**--swarm-default-advertise-addr**[=*IP|INTERFACE*]]
 [**--tls**]
 [**--tlscacert**[=*~/.docker/ca.pem*]]
 [**--tlscert**[=*~/.docker/cert.pem*]]
 [**--tlskey**[=*~/.docker/key.pem*]]
 [**--tlsverify**]
 [**--userland-proxy**[=*true*]]
+[**--userland-proxy-path**[=*""*]]
 [**--userns-remap**[=*default*]]
 
 # DESCRIPTION
@@ -72,6 +79,9 @@ format.
 **dockerd [OPTIONS]**
 
 # OPTIONS
+
+**--add-runtime**=[]
+  Set additional OCI compatible runtime.
 
 **--api-cors-header**=""
   Set CORS headers in the remote API. Default is cors disabled. Give urls like "http://foo, http://bar, ...". Give "*" to allow all.
@@ -115,10 +125,10 @@ format.
   IPv6 address of the container default gateway
 
 **--default-ulimit**=[]
-  Set default ulimits for containers.
+  Default ulimits for containers.
 
 **--disable-legacy-registry**=*true*|*false*
-  Do not contact legacy registries
+  Disable contacting legacy registries
 
 **--dns**=""
   Force Docker to use specific DNS servers
@@ -159,6 +169,12 @@ unix://[/path/to/socket] to use.
 **--icc**=*true*|*false*
   Allow unrestricted inter\-container and Docker daemon host communication. If disabled, containers can still be linked together using the **--link** option (see **docker-run(1)**). Default is true.
 
+**--init**
+Run an init process inside containers for signal forwarding and process reaping.
+
+**--init-path**
+Path to the docker-init binary.
+
 **--insecure-registry**=[]
   Enable insecure registry communication, i.e., enable un-encrypted and/or untrusted communication.
 
@@ -183,11 +199,19 @@ unix://[/path/to/socket] to use.
 **--ipv6**=*true*|*false*
   Enable IPv6 support. Default is false. Docker will create an IPv6-enabled bridge with address fe80::1 which will allow you to create IPv6-enabled containers. Use together with `--fixed-cidr-v6` to provide globally routable IPv6 addresses. IPv6 forwarding will be enabled if not used with `--ip-forward=false`. This may collide with your host's current IPv6 settings. For more information please consult the documentation about "Advanced Networking - IPv6".
 
+**--isolation**="*default*"
+   Isolation specifies the type of isolation technology used by containers. Note
+that the default on Windows server is `process`, and the default on Windows client
+is `hyperv`. Linux only supports `default`.
+
 **-l**, **--log-level**="*debug*|*info*|*warn*|*error*|*fatal*"
   Set the logging level. Default is `info`.
 
 **--label**="[]"
   Set key=value labels to the daemon (displayed in `docker info`)
+
+**--live-restore**=*false*
+  Enable live restore of running containers when the daemon starts so that they are not restarted.
 
 **--log-driver**="*json-file*|*syslog*|*journald*|*gelf*|*fluentd*|*awslogs*|*splunk*|*etwlogs*|*gcplogs*|*none*"
   Default driver for container logs. Default is `json-file`.
@@ -220,10 +244,15 @@ output otherwise.
   Force the Docker runtime to use a specific storage driver.
 
 **--selinux-enabled**=*true*|*false*
-  Enable selinux support. Default is false. SELinux does not presently support the overlay storage driver.
+  Enable selinux support. Default is false.
 
 **--storage-opt**=[]
   Set storage driver options. See STORAGE DRIVER OPTIONS.
+
+**--swarm-default-advertise-addr**=*IP|INTERFACE*
+  Set default address or interface for swarm to advertise as its externally-reachable address to other cluster
+  members. This can be a hostname, an IP address, or an interface such as `eth0`. A port cannot be specified with
+  this option.
 
 **--tls**=*true*|*false*
   Use TLS; implied by --tlsverify. Default is false.
@@ -243,6 +272,9 @@ output otherwise.
 
 **--userland-proxy**=*true*|*false*
     Rely on a userland proxy implementation for inter-container and outside-to-container loopback communications. Default is true.
+
+**--userland-proxy-path**=""
+  Path to the userland proxy binary.
 
 **--userns-remap**=*default*|*uid:gid*|*user:group*|*user*|*uid*
     Enable user namespaces for containers on the daemon. Specifying "default" will cause a new user and group to be created to handle UID and GID range remapping for the user namespace mappings used for contained processes. Specifying a user (or uid) and optionally a group (or gid) will cause the daemon to lookup the user and group's subordinate ID ranges for use as the user namespace mappings for contained processes.
@@ -508,6 +540,21 @@ Engine daemon, grow the size of loop files and restart the daemon to resolve
 the issue.
 
 Example use:: `dockerd --storage-opt dm.min_free_space=10%`
+
+#### dm.xfs_nospace_max_retries
+
+Specifies the maximum number of retries XFS should attempt to complete
+IO when ENOSPC (no space) error is returned by underlying storage device.
+
+By default XFS retries infinitely for IO to finish and this can result
+in unkillable process. To change this behavior one can set
+xfs_nospace_max_retries to say 0 and XFS will not retry IO after getting
+ENOSPC and will shutdown filesystem.
+
+Example use:
+
+    $ sudo dockerd --storage-opt dm.xfs_nospace_max_retries=0
+
 
 ## ZFS options
 

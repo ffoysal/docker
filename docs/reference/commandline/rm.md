@@ -1,23 +1,22 @@
-<!--[metadata]>
-+++
-title = "rm"
-description = "The rm command description and usage"
-keywords = ["remove, Docker, container"]
-[menu.main]
-parent = "smn_cli"
-+++
-<![end-metadata]-->
+---
+title: "rm"
+description: "The rm command description and usage"
+keywords: ["remove, Docker, container"]
+---
 
 # rm
 
-    Usage: docker rm [OPTIONS] CONTAINER [CONTAINER...]
+```markdown
+Usage:  docker rm [OPTIONS] CONTAINER [CONTAINER...]
 
-    Remove one or more containers
+Remove one or more containers
 
-      -f, --force            Force the removal of a running container (uses SIGKILL)
-      --help                 Print usage
-      -l, --link             Remove the specified link
-      -v, --volumes          Remove the volumes associated with the container
+Options:
+  -f, --force     Force the removal of a running container (uses SIGKILL)
+      --help      Print usage
+  -l, --link      Remove the specified link
+  -v, --volumes   Remove the volumes associated with the container
+```
 
 ## Examples
 

@@ -11,13 +11,13 @@ import (
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
+	containertypes "github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/pkg/chrootarchive"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/pkg/symlink"
 	"github.com/docker/docker/pkg/system"
 	"github.com/docker/docker/utils"
 	"github.com/docker/docker/volume"
-	containertypes "github.com/docker/engine-api/types/container"
 	"github.com/opencontainers/runc/libcontainer/label"
 )
 
@@ -52,13 +52,13 @@ type ExitStatus struct {
 // environment variables related to links.
 // Sets PATH, HOSTNAME and if container.Config.Tty is set: TERM.
 // The defaults set here do not override the values in container.Config.Env
-func (container *Container) CreateDaemonEnvironment(linkedEnv []string) []string {
+func (container *Container) CreateDaemonEnvironment(tty bool, linkedEnv []string) []string {
 	// Setup environment
 	env := []string{
 		"PATH=" + system.DefaultPathEnv,
 		"HOSTNAME=" + container.Config.Hostname,
 	}
-	if container.Config.Tty {
+	if tty {
 		env = append(env, "TERM=xterm")
 	}
 	env = append(env, linkedEnv...)
@@ -118,7 +118,9 @@ func (container *Container) NetworkMounts() []Mount {
 		if _, err := os.Stat(container.ResolvConfPath); err != nil {
 			logrus.Warnf("ResolvConfPath set to %q, but can't stat this filename (err = %v); skipping", container.ResolvConfPath, err)
 		} else {
-			label.Relabel(container.ResolvConfPath, container.MountLabel, shared)
+			if !container.HasMountFor("/etc/resolv.conf") {
+				label.Relabel(container.ResolvConfPath, container.MountLabel, shared)
+			}
 			writable := !container.HostConfig.ReadonlyRootfs
 			if m, exists := container.MountPoints["/etc/resolv.conf"]; exists {
 				writable = m.RW
@@ -127,7 +129,7 @@ func (container *Container) NetworkMounts() []Mount {
 				Source:      container.ResolvConfPath,
 				Destination: "/etc/resolv.conf",
 				Writable:    writable,
-				Propagation: volume.DefaultPropagationMode,
+				Propagation: string(volume.DefaultPropagationMode),
 			})
 		}
 	}
@@ -135,7 +137,9 @@ func (container *Container) NetworkMounts() []Mount {
 		if _, err := os.Stat(container.HostnamePath); err != nil {
 			logrus.Warnf("HostnamePath set to %q, but can't stat this filename (err = %v); skipping", container.HostnamePath, err)
 		} else {
-			label.Relabel(container.HostnamePath, container.MountLabel, shared)
+			if !container.HasMountFor("/etc/hostname") {
+				label.Relabel(container.HostnamePath, container.MountLabel, shared)
+			}
 			writable := !container.HostConfig.ReadonlyRootfs
 			if m, exists := container.MountPoints["/etc/hostname"]; exists {
 				writable = m.RW
@@ -144,7 +148,7 @@ func (container *Container) NetworkMounts() []Mount {
 				Source:      container.HostnamePath,
 				Destination: "/etc/hostname",
 				Writable:    writable,
-				Propagation: volume.DefaultPropagationMode,
+				Propagation: string(volume.DefaultPropagationMode),
 			})
 		}
 	}
@@ -152,7 +156,9 @@ func (container *Container) NetworkMounts() []Mount {
 		if _, err := os.Stat(container.HostsPath); err != nil {
 			logrus.Warnf("HostsPath set to %q, but can't stat this filename (err = %v); skipping", container.HostsPath, err)
 		} else {
-			label.Relabel(container.HostsPath, container.MountLabel, shared)
+			if !container.HasMountFor("/etc/hosts") {
+				label.Relabel(container.HostsPath, container.MountLabel, shared)
+			}
 			writable := !container.HostConfig.ReadonlyRootfs
 			if m, exists := container.MountPoints["/etc/hosts"]; exists {
 				writable = m.RW
@@ -161,7 +167,7 @@ func (container *Container) NetworkMounts() []Mount {
 				Source:      container.HostsPath,
 				Destination: "/etc/hosts",
 				Writable:    writable,
-				Propagation: volume.DefaultPropagationMode,
+				Propagation: string(volume.DefaultPropagationMode),
 			})
 		}
 	}
@@ -193,6 +199,9 @@ func (container *Container) CopyImagePathContent(v volume.Volume, destination st
 			logrus.Warnf("error while unmounting volume %s: %v", v.Name(), err)
 		}
 	}()
+	if err := label.Relabel(path, container.MountLabel, true); err != nil && err != syscall.ENOTSUP {
+		return err
+	}
 	return copyExistingContents(rootfs, path)
 }
 
@@ -243,7 +252,7 @@ func (container *Container) IpcMounts() []Mount {
 			Source:      container.ShmPath,
 			Destination: "/dev/shm",
 			Writable:    true,
-			Propagation: volume.DefaultPropagationMode,
+			Propagation: string(volume.DefaultPropagationMode),
 		})
 	}
 
@@ -277,6 +286,11 @@ func (container *Container) UpdateContainer(hostConfig *containertypes.HostConfi
 		cResources.CpusetMems = resources.CpusetMems
 	}
 	if resources.Memory != 0 {
+		// if memory limit smaller than already set memoryswap limit and doesn't
+		// update the memoryswap limit, then error out.
+		if resources.Memory > cResources.MemorySwap && resources.MemorySwap == 0 {
+			return fmt.Errorf("Memory limit should be smaller than already set memoryswap limit, update the memoryswap at the same time")
+		}
 		cResources.Memory = resources.Memory
 	}
 	if resources.MemorySwap != 0 {
@@ -291,6 +305,9 @@ func (container *Container) UpdateContainer(hostConfig *containertypes.HostConfi
 
 	// update HostConfig of container
 	if hostConfig.RestartPolicy.Name != "" {
+		if container.HostConfig.AutoRemove && !hostConfig.RestartPolicy.IsNone() {
+			return fmt.Errorf("Restart policy cannot be updated because AutoRemove is enabled for the container")
+		}
 		container.HostConfig.RestartPolicy = hostConfig.RestartPolicy
 	}
 
@@ -319,7 +336,7 @@ func (container *Container) UnmountVolumes(forceSyscall bool, volumeEventLog fun
 			return err
 		}
 
-		volumeMounts = append(volumeMounts, volume.MountPoint{Destination: dest, Volume: mntPoint.Volume})
+		volumeMounts = append(volumeMounts, volume.MountPoint{Destination: dest, Volume: mntPoint.Volume, ID: mntPoint.ID})
 	}
 
 	// Append any network mounts to the list (this is a no-op on Windows)
@@ -410,4 +427,9 @@ func cleanResourcePath(path string) string {
 // can be mounted locally. A no-op on non-Windows platforms
 func (container *Container) canMountFS() bool {
 	return true
+}
+
+// EnableServiceDiscoveryOnDefaultNetwork Enable service discovery on default network
+func (container *Container) EnableServiceDiscoveryOnDefaultNetwork() bool {
+	return false
 }

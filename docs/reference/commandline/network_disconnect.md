@@ -1,22 +1,20 @@
-<!--[metadata]>
-+++
-title = "network disconnect"
-description = "The network disconnect command description and usage"
-keywords = ["network, disconnect, user-defined"]
-[menu.main]
-parent = "smn_cli"
-+++
-<![end-metadata]-->
+---
+title: "network disconnect"
+description: "The network disconnect command description and usage"
+keywords: ["network, disconnect, user-defined"]
+---
 
 # network disconnect
 
-    Usage:  docker network disconnect [OPTIONS] NETWORK CONTAINER
+```markdown
+Usage:  docker network disconnect [OPTIONS] NETWORK CONTAINER
 
+Disconnect a container from a network
 
-    Disconnects a container from a network
-
-      -f, --force        Force the container to disconnect from a network
-      --help             Print usage
+Options:
+  -f, --force   Force the container to disconnect from a network
+      --help    Print usage
+```
 
 Disconnects a container from a network. The container must be running to disconnect it from the network.
 
@@ -32,4 +30,4 @@ Disconnects a container from a network. The container must be running to disconn
 * [network create](network_create.md)
 * [network ls](network_ls.md)
 * [network rm](network_rm.md)
-* [Understand Docker container networks](../../userguide/networking/dockernetworks.md)
+* [Understand Docker container networks](../../userguide/networking/index.md)
