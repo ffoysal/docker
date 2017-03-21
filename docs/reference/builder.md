@@ -796,6 +796,7 @@ Each `<src>` may contain wildcards and matching will be done using Go's
 
     ADD hom* /mydir/        # adds all files starting with "hom"
     ADD hom?.txt /mydir/    # ? is replaced with any single character, e.g., "home.txt"
+    ADD arr[[]0].txt /mydir/    # file name will be "arr[0].txt"
 
 The `<dest>` is an absolute path, or a path relative to `WORKDIR`, into which
 the source will be copied inside the destination container.
@@ -908,6 +909,7 @@ Each `<src>` may contain wildcards and matching will be done using Go's
 
     COPY hom* /mydir/        # adds all files starting with "hom"
     COPY hom?.txt /mydir/    # ? is replaced with any single character, e.g., "home.txt"
+    COPY arr[[]0].txt /mydir/    # file name will be "arr[0].txt"
 
 The `<dest>` is an absolute path, or a path relative to `WORKDIR`, into which
 the source will be copied inside the destination container.
